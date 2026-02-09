@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  # Включение GPU для Ollama.
+  # Использование:
+  #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+  #
+  # Требования:
+  # - Linux/WSL2 + установленный nvidia-container-toolkit
+  # - совместимый драйвер NVIDIA
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility

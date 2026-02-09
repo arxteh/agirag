@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel
 from lightrag import LightRAG, QueryParam
-from lightrag.llm import openai_complete_if_cache, openai_embedding
+from lightrag.llm.openai import openai_complete_if_cache, openai_embed
 from lightrag.utils import EmbeddingFunc
 import numpy as np
 
@@ -10,20 +10,27 @@ app = FastAPI()
 
 # Конфигурация из переменных окружения
 WORKING_DIR = os.getenv("RAG_WORKING_DIR", "./rag_storage")
+
+# OpenAI-compatible LLM
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-r1-0528:free")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1").strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 
+# OpenAI-compatible embedding
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://openrouter.ai/api/v1")
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://openrouter.ai/api/v1").strip()
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
+
+# Для Ollama embedding и некоторых OpenAI-compatible провайдеров важно задавать правильную размерность
+# (например, qwen/qwen3-embedding-8b -> 1024). Для Ollama может отличаться.
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 if not os.path.exists(WORKING_DIR):
     os.makedirs(WORKING_DIR)
 
 # Функция эмбеддинга
 async def embedding_func(texts: list[str]) -> np.ndarray:
-    return await openai_embedding(
+    return await openai_embed(
         texts,
         model=EMBEDDING_MODEL,
         base_url=EMBEDDING_BASE_URL,
@@ -38,16 +45,15 @@ rag = LightRAG(
     llm_model_func=openai_complete_if_cache,
     llm_model_name=LLM_MODEL,
     llm_model_max_async=4,
-    llm_model_max_token_size=32768,
     llm_model_kwargs={
         "base_url": LLM_BASE_URL,
-        "api_key": LLM_API_KEY
+        "api_key": LLM_API_KEY,
     },
     embedding_func=EmbeddingFunc(
-        embedding_dim=1024, # Размерность для qwen/qwen3-embedding-8b, может потребоваться корректировка для других моделей
+        embedding_dim=EMBEDDING_DIM,
         max_token_size=8192,
-        func=embedding_func
-    )
+        func=embedding_func,
+    ),
 )
 
 class QueryRequest(BaseModel):
