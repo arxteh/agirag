@@ -1,5 +1,15 @@
 version: "3.8"
 
+# Общие переменные окружения для OpenAI-compatible провайдеров (OpenRouter/Ollama).
+x-openai-compatible: &openai_compatible_env
+  LLM_MODEL: ${LLM_MODEL}
+  LLM_BASE_URL: ${LLM_BASE_URL}
+  LLM_API_KEY: ${LLM_API_KEY}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
+  EMBEDDING_DIM: ${EMBEDDING_DIM}
+
 services:
   # --- Инфраструктура ---
   postgres:
@@ -12,13 +22,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 20
 
   redis:
     image: redis:7-alpine
@@ -26,6 +37,11 @@ services:
     restart: always
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -50,31 +66,60 @@ services:
       - "11434:11434"
     networks:
       - app-network
-    # Поддержку GPU можно включить, раскомментировав раздел deploy ниже, если установлен nvidia-container-toolkit
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
   # --- Наблюдаемость (Observability) ---
-  langfuse-server:
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: zookeeper
+    restart: always
+    networks:
+      - app-network
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    restart: always
+    depends_on:
+      - zookeeper
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      CLICKHOUSE_PASSWORD: "password"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.xml:/etc/clickhouse-server/config.d/config.xml
+    networks:
+      - app-network
+
+  langfuse:
     image: langfuse/langfuse:latest
-    container_name: langfuse-server
+    container_name: langfuse
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_started
+      redis:
+        condition: service_started
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${LANGFUSE_DB_NAME}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       SALT: ${LANGFUSE_SALT}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       TELEMETRY_ENABLED: "false"
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      REDIS_URL: redis://redis:6379
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "password"
     ports:
       - "3000:3000"
     networks:
@@ -94,16 +139,46 @@ services:
     networks:
       - app-network
 
-  # --- Логика приложения ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: always
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - app-network
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: always
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8081:8080"
+    networks:
+      - app-network
+
+  # --- LLM приложения / оркестрация ---
   n8n:
     image: n8nio/n8n:latest
     container_name: n8n
     restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
       - DB_POSTGRESDB_USER=${POSTGRES_USER}
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
       - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE}
@@ -114,13 +189,22 @@ services:
       - N8N_PROTOCOL=${N8N_PROTOCOL}
       - WEBHOOK_URL=${WEBHOOK_URL}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # Стабильные адреса внутренних сервисов для рабочих процессов
+      - DOCLING_URL=${DOCLING_URL}
+      - LIGHTRAG_URL=${LIGHTRAG_URL}
+      - QDRANT_URL=${QDRANT_URL}
+      # OpenAI-compatible (для удобного использования HTTP Request/Custom code)
+      - LLM_MODEL=${LLM_MODEL}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - EMBEDDING_DIM=${EMBEDDING_DIM}
     ports:
       - "5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks:
       - app-network
 
@@ -128,29 +212,35 @@ services:
     image: flowiseai/flowise:latest
     container_name: flowise
     restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       - DATABASE_TYPE=postgres
       - DATABASE_PORT=5432
       - DATABASE_HOST=postgres
-      - DATABASE_NAME=${POSTGRES_DB}
+      - DATABASE_NAME=${FLOWISE_DB_NAME}
       - DATABASE_USER=${POSTGRES_USER}
       - DATABASE_PASSWORD=${POSTGRES_PASSWORD}
       - APIKEY_PATH=/root/.flowise
       - SECRETKEY_PATH=/root/.flowise
       - FLOWISE_USERNAME=${FLOWISE_USERNAME}
       - FLOWISE_PASSWORD=${FLOWISE_PASSWORD}
-      # Внедрение конфигурации LLM для удобства в среде Flowise
+      # OpenAI-compatible (узлы Flowise)
       - OPENAI_API_BASE=${LLM_BASE_URL}
       - OPENAI_API_KEY=${LLM_API_KEY}
+      - OPENAI_MODEL=${LLM_MODEL}
+      # Embedding (Векторизация)
       - EMBEDDING_API_BASE=${EMBEDDING_BASE_URL}
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_DIM=${EMBEDDING_DIM}
+      # Ollama (быстрое переключение)
+      - OLLAMA_BASE_URL=http://ollama:11434
     ports:
       - "3002:3000"
     volumes:
       - flowise_data:/root/.flowise
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks:
       - app-network
 
@@ -159,11 +249,12 @@ services:
     container_name: open-webui
     restart: always
     environment:
+      # OpenAI-compatible (OpenRouter/Ollama)
       - OPENAI_API_BASE_URL=${LLM_BASE_URL}
       - OPENAI_API_KEY=${LLM_API_KEY}
-      # Если используется локальная Ollama внутри сети:
+      # Локальная Ollama внутри сети (для быстрого переключения в UI)
       - OLLAMA_BASE_URL=http://ollama:11434
-      - WEBUI_SECRET_KEY=${NEXTAUTH_SECRET} # Повторное использование секрета для простоты
+      - WEBUI_SECRET_KEY=${NEXTAUTH_SECRET}
     ports:
       - "3003:8080"
     volumes:
@@ -182,24 +273,63 @@ services:
       - "8000:8000"
     networks:
       - app-network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:8000/health >NUL 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   lightrag:
     build: ./services/lightrag
     container_name: lightrag
     restart: always
-    environment:
-      - QDRANT_HOST=qdrant
-      - QDRANT_API_KEY=${QDRANT_API_KEY}
-      - LLM_BASE_URL=${LLM_BASE_URL}
-      - LLM_API_KEY=${LLM_API_KEY}
-      - LLM_MODEL=${LLM_MODEL}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
-    ports:
-      - "8001:8000"
     depends_on:
       - qdrant
+    environment:
+      <<: *openai_compatible_env
+      QDRANT_HOST: qdrant
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+    ports:
+      - "8001:8000"
+    networks:
+      - app-network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:8000/health >NUL 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # --- MLflow (MLOps) ---
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MLFLOW_AUTH_ENABLED: ${MLFLOW_AUTH_ENABLED}
+    command:
+      - sh
+      - -lc
+      - >
+        mlflow server \
+          --host 0.0.0.0 \
+          --port 5000 \
+          --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${MLFLOW_DB_NAME} \
+          --default-artifact-root /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
     networks:
       - app-network
 
@@ -211,6 +341,9 @@ volumes:
   flowise_data:
   openwebui_data:
   grafana_data:
+  clickhouse_data:
+  prometheus_data:
+  mlflow_data:
 
 networks:
   app-network:

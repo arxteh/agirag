@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Установка docling
-RUN pip install --no-cache-dir docling uvicorn fastapi
+RUN pip install --no-cache-dir docling uvicorn fastapi python-multipart
 
 # Копирование кода приложения
 COPY . .
