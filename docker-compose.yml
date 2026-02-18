@@ -1,6 +1,4 @@
-version: "3.8"
-
-# Общие переменные окружения для OpenAI-compatible провайдеров (OpenRouter/Ollama).
+# Общие переменные окружения для OpenAI-compatible провайдеров (МТС/OpenRouter/Ollama).
 x-openai-compatible: &openai_compatible_env
   LLM_MODEL: ${LLM_MODEL}
   LLM_BASE_URL: ${LLM_BASE_URL}
@@ -264,7 +262,30 @@ services:
     networks:
       - app-network
 
-  # --- Пользовательские сервисы ---
+  opencode:
+    build: ./services/opencode
+    container_name: opencode
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities:
+    #             - gpu
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Moscow
+      - USER_PASSWORD=${USER_PASSWORD}
+    volumes:
+      - ./workspace:/home/ubuntu/workspace
+      - ./config/opencode:/home/ubuntu/.config/opencode
+      - ./config/nvim:/home/ubuntu/.config/nvim
+
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
   docling:
     build: ./services/docling
     container_name: docling
